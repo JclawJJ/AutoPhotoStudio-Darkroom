@@ -1,0 +1,202 @@
+{
+  "prompt": {
+    "1": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {
+        "ckpt_name": "realisticVisionV60B1_v51VAE.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "lightly even out skin tone and remove redness, preserve natural skin texture and facial details, asian aesthetic, macro photography, highly detailed",
+        "clip": [
+          "1",
+          1
+        ]
+      }
+    },
+    "3": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "glamour retouching, heavy makeup, plastic skin, silicone reflection, glossy face, low detail",
+        "clip": [
+          "1",
+          1
+        ]
+      }
+    },
+    "4": {
+      "class_type": "WAS_Image_Load",
+      "inputs": {
+        "image_path": "/Users/jclaw/.openclaw/workspace/APS_Project/test_data/raws/fake_black.jpg"
+      }
+    },
+    "5": {
+      "class_type": "WAS_Image_Load",
+      "inputs": {
+        "image_path": "/Users/jclaw/.openclaw/workspace/APS_Project/test_data/masks/fake_black_skin_mask.png"
+      }
+    },
+    "6": {
+      "class_type": "ImageToMask",
+      "inputs": {
+        "image": [
+          "5",
+          0
+        ],
+        "channel": "red"
+      }
+    },
+    "7": {
+      "class_type": "VAEEncode",
+      "inputs": {
+        "pixels": [
+          "4",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ]
+      }
+    },
+    "10": {
+      "class_type": "SetLatentNoiseMask",
+      "inputs": {
+        "samples": [
+          "7",
+          0
+        ],
+        "mask": [
+          "6",
+          0
+        ]
+      }
+    },
+    "8": {
+      "class_type": "KSampler",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "positive": [
+          "2",
+          0
+        ],
+        "negative": [
+          "3",
+          0
+        ],
+        "latent_image": [
+          "10",
+          0
+        ],
+        "seed": 1774591010,
+        "steps": 20,
+        "cfg": 7.0,
+        "sampler_name": "euler_ancestral",
+        "scheduler": "normal",
+        "denoise": 0.3
+      }
+    },
+    "11": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "8",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ]
+      }
+    },
+    "9": {
+      "class_type": "FaceDetailer",
+      "inputs": {
+        "image": [
+          "4",
+          0
+        ],
+        "model": [
+          "1",
+          0
+        ],
+        "clip": [
+          "1",
+          1
+        ],
+        "vae": [
+          "1",
+          2
+        ],
+        "positive": [
+          "2",
+          0
+        ],
+        "negative": [
+          "3",
+          0
+        ],
+        "bbox_detector": [
+          "15",
+          0
+        ],
+        "guide_size": 384,
+        "guide_size_for": true,
+        "max_size": 1024,
+        "seed": 1774591010,
+        "steps": 20,
+        "cfg": 7.0,
+        "sampler_name": "euler_ancestral",
+        "scheduler": "normal",
+        "denoise": 0.3,
+        "feather": 5,
+        "noise_mask": true,
+        "force_inpaint": true,
+        "drop_size": 10,
+        "cycle": 1
+      }
+    },
+    "12": {
+      "class_type": "ImageBlend",
+      "inputs": {
+        "image1": [
+          "9",
+          0
+        ],
+        "image2": [
+          "11",
+          0
+        ],
+        "blend_factor": 0.65,
+        "blend_mode": "normal"
+      }
+    },
+    "13": {
+      "class_type": "WAS_Image_Save",
+      "inputs": {
+        "images": [
+          "12",
+          0
+        ],
+        "output_path": "./output",
+        "filename_prefix": "aps_retouched",
+        "extension": "png",
+        "quality": 100,
+        "overwrite_mode": "false",
+        "embed_workflow": "false"
+      }
+    },
+    "15": {
+      "class_type": "UltralyticsDetectorProvider",
+      "inputs": {
+        "model_name": "face_yolov8m.pt"
+      }
+    }
+  },
+  "client_id": "4ebe36ad4e384f11"
+}
