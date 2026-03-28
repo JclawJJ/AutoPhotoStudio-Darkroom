@@ -311,7 +311,7 @@ class Mapper:
         model_cache = self.cache_dir.parent / "models"
         model_cache.mkdir(parents=True, exist_ok=True)
 
-        # Load YOLOv8-face
+        # Load YOLOv8-face (bounding-box detection)
         yolo_model = cfg.get("yolo_model", "yolov8m-face")
         try:
             self.yolo = YOLO(f"{yolo_model}.pt")
@@ -319,6 +319,20 @@ class Mapper:
         except Exception:
             log.warning("Face-specific model not found, using yolov8m with person class")
             self.yolo = YOLO("yolov8m.pt")
+
+        # Load YOLOv8-seg for instance segmentation (person class 0)
+        yolo_seg_model = cfg.get("yolo_seg_model", "yolov8n-seg")
+        try:
+            self.yolo_seg = YOLO(f"{yolo_seg_model}.pt")
+            log.info("Mapper: YOLOv8-seg loaded (%s)", yolo_seg_model)
+        except Exception:
+            log.warning("YOLOv8-seg model '%s' not found, trying yolov8m-seg", yolo_seg_model)
+            try:
+                self.yolo_seg = YOLO("yolov8m-seg.pt")
+                log.info("Mapper: YOLOv8-seg loaded (yolov8m-seg)")
+            except Exception:
+                log.warning("No YOLOv8-seg model available; YOLO person mask disabled")
+                self.yolo_seg = None
 
         # MediaPipe ImageSegmenter (person vs background) — Tasks Vision API
         selfie_model = cfg.get("selfie_model", 1)
@@ -348,6 +362,23 @@ class Mapper:
         )
         self.face_landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(lm_options)
         log.info("Mapper: MediaPipe FaceLandmarker ready")
+
+    def _yolo_person_mask(self, bgr: np.ndarray) -> Optional[np.ndarray]:
+        """Run YOLOv8-seg instance segmentation → union binary mask of all person detections (uint8 0/255)."""
+        if self.yolo_seg is None:
+            return None
+        h, w = bgr.shape[:2]
+        results = self.yolo_seg.predict(bgr, conf=self.yolo_conf, verbose=False)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        for r in results:
+            if r.masks is None:
+                continue
+            for cls_id, seg_mask in zip(r.boxes.cls, r.masks.data):
+                if int(cls_id) == 0:  # class 0 = person
+                    m = seg_mask.cpu().numpy()
+                    m_resized = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+                    mask = cv2.bitwise_or(mask, (m_resized > 0.5).astype(np.uint8) * 255)
+        return mask
 
     def _selfie_mask(self, bgr: np.ndarray) -> np.ndarray:
         """Run MediaPipe ImageSegmenter → binary person mask (uint8 0/255)."""
@@ -428,10 +459,23 @@ class Mapper:
         )
         return cache_path
 
-    def analyse(self, rec: ImageRecord) -> ImageRecord:
-        bgr = rec.decoded_bgr
+    def _export_debug_images(self, rec: ImageRecord, yolo_mask: Optional[np.ndarray],
+                             mp_mask: np.ndarray, final_mask: np.ndarray) -> None:
+        """Export stage debug images to output/debug/<image_stem>/."""
+        debug_dir = Path(self._output_dir) / "debug" / rec.source_path.stem
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stage 1: YOLOv8 face detection
+        if yolo_mask is not None:
+            cv2.imwrite(str(debug_dir / "Stage1_YOLO_Person_Mask.png"), yolo_mask)
+        cv2.imwrite(str(debug_dir / "Stage2_MediaPipe_Raw_Mask.png"), mp_mask)
+        cv2.imwrite(str(debug_dir / "Stage3_Final_Skin_Mask.png"), final_mask)
+        log.info("Mapper: debug images → %s", debug_dir)
+
+    def analyse(self, rec: ImageRecord, output_dir: str = "./output") -> ImageRecord:
+        bgr = rec.decoded_bgr
+        self._output_dir = output_dir
+
+        # Stage 1a: YOLOv8 face detection (bounding boxes)
         results = self.yolo.predict(bgr, conf=self.yolo_conf, verbose=False)
         boxes = []
         for r in results:
@@ -446,8 +490,21 @@ class Mapper:
         rec.face_boxes = boxes
         log.info("Mapper: %s — %d face(s) detected", rec.source_path.name, len(boxes))
 
-        # Stage 2: MediaPipe segmentation
-        person_mask = self._selfie_mask(bgr)
+        # Stage 1b: YOLOv8-seg person instance segmentation
+        yolo_person_mask = self._yolo_person_mask(bgr)
+
+        # Stage 2: MediaPipe segmentation (raw)
+        mediapipe_mask = self._selfie_mask(bgr)
+
+        # Stage 3: Intersect YOLO person mask with MediaPipe mask
+        # This eliminates background noise (e.g. ocean waves misidentified as person)
+        if yolo_person_mask is not None:
+            person_mask = cv2.bitwise_and(mediapipe_mask, yolo_person_mask)
+            log.info("Mapper: %s — YOLO∩MediaPipe intersection applied", rec.source_path.name)
+        else:
+            person_mask = mediapipe_mask
+            log.warning("Mapper: %s — no YOLO-seg mask, using raw MediaPipe", rec.source_path.name)
+
         skin_mask, hair_mask, face_mask = self._build_masks(bgr, person_mask)
         rec.skin_mask = skin_mask
         rec.hair_mask = hair_mask
@@ -455,6 +512,9 @@ class Mapper:
 
         skin_pct = float(np.sum(skin_mask > 0)) / skin_mask.size * 100
         log.info("Mapper: %s — skin=%.1f%%", rec.source_path.name, skin_pct)
+
+        # Export debug stage images
+        self._export_debug_images(rec, yolo_person_mask, mediapipe_mask, skin_mask)
 
         # Cache
         cache_path = self._cache_embedding(rec, skin_mask, hair_mask, face_mask)
@@ -1058,7 +1118,7 @@ class APSPipeline:
             return rec
 
         # Map (face detection + skin segmentation)
-        self.mapper.analyse(rec)
+        self.mapper.analyse(rec, output_dir=str(self.output_dir))
 
         # Forge (retouch)
         self.forge.retouch(rec)
